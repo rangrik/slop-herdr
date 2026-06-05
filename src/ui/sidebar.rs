@@ -14,7 +14,7 @@ use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
-const AGENT_PANEL_HEADER_ROWS: u16 = 3;
+const AGENT_PANEL_HEADER_ROWS: u16 = 2;
 
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
@@ -29,43 +29,19 @@ pub(crate) struct AgentPanelEntry {
     pub state_labels: std::collections::HashMap<String, String>,
 }
 
-fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
-    if total_h == 0 {
-        return (0, 0);
-    }
-
-    if total_h < 6 {
-        let ws_h = total_h.div_ceil(2);
-        return (ws_h, total_h.saturating_sub(ws_h));
-    }
-
-    let ratio = split_ratio.clamp(0.1, 0.9);
-    let ws_h = ((total_h as f32) * ratio).round() as u16;
-    let ws_h = ws_h.clamp(3, total_h.saturating_sub(3));
-    let detail_h = total_h.saturating_sub(ws_h);
-    (ws_h, detail_h)
-}
-
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height == 0 {
-        return (Rect::default(), Rect::default());
-    }
-
-    let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
-    let detail_area = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
-    (ws_area, detail_area)
-}
-
-pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height < 6 {
+/// Content area of the right-docked agents bar. The leftmost column is
+/// reserved for the vertical separator that divides the bar from the
+/// terminal area, so the content starts one column in.
+pub(crate) fn agents_bar_content_rect(area: Rect) -> Rect {
+    if area.width <= 1 || area.height == 0 {
         return Rect::default();
     }
-
-    let (ws_h, _) = sidebar_section_heights(content.height, split_ratio);
-    Rect::new(content.x, content.y + ws_h, content.width, 1)
+    Rect::new(
+        area.x + 1,
+        area.y,
+        area.width.saturating_sub(1),
+        area.height,
+    )
 }
 
 fn agent_panel_current_workspace_idx(app: &AppState) -> Option<usize> {
@@ -104,7 +80,7 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, scope: AgentPanelScope) -> Rec
     let width = label.chars().count() as u16;
     Rect::new(
         area.x + area.width.saturating_sub(width),
-        area.y + 1,
+        area.y,
         width,
         1,
     )
@@ -330,7 +306,7 @@ fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) 
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area);
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -444,9 +420,20 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
     entries
 }
 
-pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
-    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
-    ws_area
+/// The workspace list now occupies the left sidebar (the agents panel has
+/// moved to its own right-docked bar). The rightmost column is reserved for
+/// the sidebar's vertical separator, and the bottom row is reserved for the
+/// collapse toggle so the footer (new/menu) never lands on the toggle's cell.
+pub(crate) fn workspace_list_rect(area: Rect) -> Rect {
+    if area.width == 0 || area.height <= 1 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(1),
+        area.height.saturating_sub(1),
+    )
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -586,7 +573,7 @@ pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
 ) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -643,26 +630,15 @@ pub(crate) fn compute_workspace_card_areas(
 
 /// Auto-scale sidebar width based on workspace identity + agent summary.
 pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
+    // The collapsed sidebar shows only the workspace glance now; the agents
+    // panel lives in its own right-docked bar. Return the full content area
+    // with no divider and an empty agent-detail section.
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), None, Rect::default());
     }
 
-    if content.height < 7 {
-        return (content, None, Rect::default());
-    }
-
-    let total_h = content.height as usize;
-    let ws_h = total_h.div_ceil(2);
-    let detail_h = total_h.saturating_sub(ws_h + 1);
-    if ws_h == 0 || detail_h == 0 {
-        return (content, None, Rect::default());
-    }
-
-    let divider_y = content.y + ws_h as u16;
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
-    let detail_area = Rect::new(content.x, divider_y + 1, content.width, detail_h as u16);
-    (ws_area, Some(divider_y), detail_area)
+    (content, None, Rect::default())
 }
 
 /// Collapsed sidebar: workspace glance on top, compact agent list below.
@@ -830,11 +806,41 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area);
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_agent_detail(app, terminal_runtimes, frame, detail_area);
     render_sidebar_toggle(app, frame, area, false, p);
+}
+
+/// Render the right-docked agents bar: a vertical separator on its inner
+/// (left) edge, then the agent panel content.
+pub(super) fn render_agents_bar(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let p = &app.palette;
+    let is_navigating = matches!(app.mode, Mode::Navigate);
+    let sep_style = if is_navigating {
+        Style::default().fg(p.accent)
+    } else {
+        Style::default().fg(p.surface_dim)
+    };
+
+    // Separator sits on the inner (left) edge, adjacent to the terminal area.
+    let sep_x = area.x;
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y + area.height {
+        buf[(sep_x, y)].set_symbol("│");
+        buf[(sep_x, y)].set_style(sep_style);
+    }
+
+    render_agent_detail(app, terminal_runtimes, frame, agents_bar_content_rect(area));
 }
 
 fn render_workspace_list(
@@ -1054,22 +1060,16 @@ fn render_agent_detail(
 ) {
     let p = &app.palette;
 
-    if area.height < 3 {
+    if area.height < 2 {
         return;
     }
-
-    let sep_line = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(Span::styled(&sep_line, Style::default().fg(p.surface_dim))),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " agents",
             Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
         )])),
-        Rect::new(area.x, area.y + 1, area.width, 1),
+        Rect::new(area.x, area.y, area.width, 1),
     );
     let toggle_rect = agent_panel_toggle_rect(area, app.agent_panel_scope);
     if toggle_rect != Rect::default() {
@@ -1402,18 +1402,19 @@ mod tests {
     }
 
     #[test]
-    fn expanded_sidebar_sections_handle_tiny_heights() {
-        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
+    fn workspace_list_rect_reserves_separator_column_and_toggle_row() {
+        let ws_area = workspace_list_rect(Rect::new(0, 0, 20, 8));
 
-        assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
-        assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
+        // One column reserved on the right for the separator, one row reserved
+        // at the bottom for the collapse toggle.
+        assert_eq!(ws_area, Rect::new(0, 0, 19, 7));
     }
 
     #[test]
-    fn sidebar_section_divider_is_hidden_for_tiny_heights() {
-        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5);
+    fn agents_bar_content_reserves_left_separator_column() {
+        let content = agents_bar_content_rect(Rect::new(80, 0, 20, 8));
 
-        assert_eq!(divider, Rect::default());
+        assert_eq!(content, Rect::new(81, 0, 19, 8));
     }
 
     #[test]

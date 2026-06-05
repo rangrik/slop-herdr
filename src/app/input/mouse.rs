@@ -144,6 +144,13 @@ impl AppState {
             && mouse.row >= sidebar.y
             && mouse.row < sidebar.y + sidebar.height;
 
+        let agents_bar = self.view.agents_bar_rect;
+        let in_agents_bar = agents_bar.width > 0
+            && mouse.column >= agents_bar.x
+            && mouse.column < agents_bar.x + agents_bar.width
+            && mouse.row >= agents_bar.y
+            && mouse.row < agents_bar.y + agents_bar.height;
+
         if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar) {
             return None;
         }
@@ -383,11 +390,47 @@ impl AppState {
                     return None;
                 }
 
-                if self.on_sidebar_section_divider(mouse.column, mouse.row) {
+                if self.on_agents_bar_divider(mouse.column, mouse.row) {
                     self.drag = Some(DragState {
-                        target: DragTarget::SidebarSectionDivider,
+                        target: DragTarget::AgentsBarDivider,
                     });
-                    self.set_sidebar_section_split(mouse.row);
+                    self.set_manual_agents_bar_width(mouse.column);
+                    return None;
+                }
+
+                if in_agents_bar {
+                    if self.on_agent_panel_scope_toggle(mouse.column, mouse.row) {
+                        self.agent_panel_scope = match self.agent_panel_scope {
+                            AgentPanelScope::CurrentWorkspace => AgentPanelScope::AllWorkspaces,
+                            AgentPanelScope::AllWorkspaces => AgentPanelScope::CurrentWorkspace,
+                        };
+                        self.agent_panel_scroll = 0;
+                        self.mark_session_dirty();
+                        return None;
+                    }
+
+                    if let Some(target) =
+                        self.agent_panel_scrollbar_target_at(mouse.column, mouse.row)
+                    {
+                        match target {
+                            ScrollbarClickTarget::Thumb { grab_row_offset } => {
+                                self.drag = Some(DragState {
+                                    target: DragTarget::AgentPanelScrollbar { grab_row_offset },
+                                });
+                            }
+                            ScrollbarClickTarget::Track { offset_from_bottom } => {
+                                self.set_agent_panel_offset_from_bottom(offset_from_bottom);
+                            }
+                        }
+                        return None;
+                    }
+
+                    if let Some((ws_idx, _tab_idx, pane_id)) =
+                        self.agent_detail_target_at(mouse.row)
+                    {
+                        self.focus_pane_in_workspace(ws_idx, pane_id);
+                        self.mode = Mode::Terminal;
+                    }
                     return None;
                 }
 
@@ -465,14 +508,6 @@ impl AppState {
                         if let Some(idx) = self.collapsed_workspace_at_row(mouse.row) {
                             self.switch_workspace(idx);
                             self.mode = Mode::Terminal;
-                            return None;
-                        }
-
-                        if let Some((ws_idx, _tab_idx, pane_id)) =
-                            self.collapsed_agent_detail_target_at(mouse.row)
-                        {
-                            self.focus_pane_in_workspace(ws_idx, pane_id);
-                            self.mode = Mode::Terminal;
                         }
                         return None;
                     }
@@ -532,40 +567,6 @@ impl AppState {
                             start_col: mouse.column,
                             start_row: mouse.row,
                         });
-                        return None;
-                    }
-
-                    if self.on_agent_panel_scope_toggle(mouse.column, mouse.row) {
-                        self.agent_panel_scope = match self.agent_panel_scope {
-                            AgentPanelScope::CurrentWorkspace => AgentPanelScope::AllWorkspaces,
-                            AgentPanelScope::AllWorkspaces => AgentPanelScope::CurrentWorkspace,
-                        };
-                        self.agent_panel_scroll = 0;
-                        self.mark_session_dirty();
-                        return None;
-                    }
-
-                    if let Some(target) =
-                        self.agent_panel_scrollbar_target_at(mouse.column, mouse.row)
-                    {
-                        match target {
-                            ScrollbarClickTarget::Thumb { grab_row_offset } => {
-                                self.drag = Some(DragState {
-                                    target: DragTarget::AgentPanelScrollbar { grab_row_offset },
-                                });
-                            }
-                            ScrollbarClickTarget::Track { offset_from_bottom } => {
-                                self.set_agent_panel_offset_from_bottom(offset_from_bottom);
-                            }
-                        }
-                        return None;
-                    }
-
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
-                        self.focus_pane_in_workspace(ws_idx, pane_id);
-                        self.mode = Mode::Terminal;
                         return None;
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
@@ -727,8 +728,8 @@ impl AppState {
                         DragTarget::SidebarDivider => {
                             self.set_manual_sidebar_width(mouse.column);
                         }
-                        DragTarget::SidebarSectionDivider => {
-                            self.set_sidebar_section_split(mouse.row);
+                        DragTarget::AgentsBarDivider => {
+                            self.set_manual_agents_bar_width(mouse.column);
                         }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
@@ -830,6 +831,23 @@ impl AppState {
                 }
             }
 
+            MouseEventKind::ScrollUp if in_agents_bar => {
+                let agent_area = self.agent_panel_rect();
+                if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
+                    self, agent_area,
+                )) {
+                    self.scroll_agent_panel(-1);
+                }
+            }
+            MouseEventKind::ScrollDown if in_agents_bar => {
+                let agent_area = self.agent_panel_rect();
+                if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
+                    self, agent_area,
+                )) {
+                    self.scroll_agent_panel(1);
+                }
+            }
+
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if !in_sidebar && self.scroll_selection_with_wheel(terminal_runtimes, mouse) => {}
 
@@ -840,38 +858,20 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
-                let agent_area = self.agent_panel_rect();
-                let over_agent_panel = agent_area != Rect::default()
-                    && mouse.row >= agent_area.y
-                    && mouse.row < agent_area.y + agent_area.height;
-                if over_agent_panel {
-                    if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
-                        self, agent_area,
-                    )) {
-                        self.scroll_agent_panel(-1);
-                    }
-                } else if crate::ui::should_show_scrollbar(
-                    crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
-                ) {
+                if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
+                    self,
+                    self.workspace_list_rect(),
+                )) {
                     self.scroll_workspace_list(-1);
                 } else {
                     self.move_selected_workspace_by_visible_delta(-1);
                 }
             }
             MouseEventKind::ScrollDown if in_sidebar => {
-                let agent_area = self.agent_panel_rect();
-                let over_agent_panel = agent_area != Rect::default()
-                    && mouse.row >= agent_area.y
-                    && mouse.row < agent_area.y + agent_area.height;
-                if over_agent_panel {
-                    if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
-                        self, agent_area,
-                    )) {
-                        self.scroll_agent_panel(1);
-                    }
-                } else if crate::ui::should_show_scrollbar(
-                    crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
-                ) {
+                if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
+                    self,
+                    self.workspace_list_rect(),
+                )) {
                     self.scroll_workspace_list(1);
                 } else {
                     self.move_selected_workspace_by_visible_delta(1);

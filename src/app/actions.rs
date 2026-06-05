@@ -1179,14 +1179,10 @@ impl AppState {
     }
 
     fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
-        if self.sidebar_collapsed {
+        let detail_area = crate::ui::agents_bar_content_rect(self.view.agents_bar_rect);
+        if detail_area == ratatui::layout::Rect::default() {
             return;
         }
-
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
         let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
         let visible = metrics.viewport_rows;
         if visible == 0 {

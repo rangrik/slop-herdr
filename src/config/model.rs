@@ -363,6 +363,9 @@ pub struct WorktreesConfig {
 #[serde(default)]
 pub struct UiConfig {
     pub sidebar_width: u16,
+    /// Width (columns) of the right-docked agents bar. Clamped to the sidebar
+    /// min/max bounds. Default: 30.
+    pub agents_bar_width: u16,
     /// Minimum sidebar width (columns) when expanded. Default: 18.
     pub sidebar_min_width: u16,
     /// Maximum sidebar width (columns) when expanded. Default: 36.
@@ -554,6 +557,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             sidebar_width: 26,
+            agents_bar_width: 30,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,

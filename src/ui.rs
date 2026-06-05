@@ -49,7 +49,7 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
-use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+use self::sidebar::{render_agents_bar, render_sidebar, render_sidebar_collapsed};
 use self::status::{
     render_config_diagnostic, render_copy_feedback, render_toast_notification,
     toast_notification_rect,
@@ -66,12 +66,11 @@ pub(crate) use self::{
     settings::{settings_button_rects, settings_show_primary_action},
     sidebar::{
         agent_panel_body_rect, agent_panel_entries, agent_panel_scroll_metrics,
-        agent_panel_scrollbar_rect, agent_panel_toggle_rect, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
-        workspace_drop_indicator_row, workspace_list_entries, workspace_list_rect,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        WorkspaceListEntry,
+        agent_panel_scrollbar_rect, agent_panel_toggle_rect, agents_bar_content_rect,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_workspace_card_areas,
+        expanded_sidebar_toggle_rect, normalized_workspace_scroll, workspace_drop_indicator_row,
+        workspace_list_entries, workspace_list_rect, workspace_list_scroll_metrics,
+        workspace_list_scrollbar_rect, workspace_parent_group_state, WorkspaceListEntry,
     },
 };
 pub(crate) use self::{
@@ -184,8 +183,28 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
-    let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+    // Agents bar is docked on the right. Always leave the terminal a
+    // comfortable floor of columns; if the bar cannot fit at least its
+    // minimum width without dropping below that floor, hide it entirely
+    // (the layout then matches the old single-sidebar arrangement).
+    const MIN_MAIN_WIDTH: u16 = 30;
+    let room_for_agents = area
+        .width
+        .saturating_sub(sidebar_w.saturating_add(MIN_MAIN_WIDTH));
+    let agents_w = if room_for_agents >= app.sidebar_min_width {
+        app.agents_bar_width
+            .clamp(app.sidebar_min_width, app.sidebar_max_width)
+            .min(room_for_agents)
+    } else {
+        0
+    };
+
+    let [sidebar_area, main_area, agents_bar_area] = Layout::horizontal([
+        Constraint::Length(sidebar_w),
+        Constraint::Min(1),
+        Constraint::Length(agents_w),
+    ])
+    .areas(area);
 
     let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
     let (tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
@@ -198,15 +217,15 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
-        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
-        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
     } else {
         app.workspace_scroll = app
             .workspace_scroll
             .min(app.workspaces.len().saturating_sub(1));
-        app.agent_panel_scroll = 0;
     }
+
+    let agents_content = agents_bar_content_rect(agents_bar_area);
+    let max_agent_scroll = agent_panel_scroll_metrics(app, agents_content).max_offset_from_bottom;
+    app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
 
     let workspace_card_areas = if app.sidebar_collapsed {
         Vec::new()
@@ -260,6 +279,7 @@ fn compute_view_internal(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
+        agents_bar_rect: agents_bar_area,
         workspace_card_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -329,6 +349,7 @@ fn compute_mobile_view(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
+        agents_bar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -357,6 +378,7 @@ pub fn render_with_runtime_registry(
     frame: &mut Frame,
 ) {
     let sidebar_area = app.view.sidebar_rect;
+    let agents_bar_area = app.view.agents_bar_rect;
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
 
@@ -368,6 +390,7 @@ pub fn render_with_runtime_registry(
         render_sidebar(app, terminal_runtimes, frame, sidebar_area);
     }
     if app.view.layout != ViewLayout::Mobile {
+        render_agents_bar(app, terminal_runtimes, frame, agents_bar_area);
         render_tab_bar(app, frame, tab_bar_area);
     }
     render_panes(app, terminal_runtimes, frame, terminal_area);

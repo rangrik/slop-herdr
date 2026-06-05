@@ -192,6 +192,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Maximum sidebar width when expanded (columns)
 # sidebar_max_width = 36
 
+# Width of the agents bar docked on the right edge (columns). Clamped to the
+# sidebar min/max bounds. The bar is hidden automatically when the terminal is
+# too narrow to fit it alongside the sidebar.
+# agents_bar_width = 30
+
 # Terminal width at or below which Herdr uses the mobile single-column layout.
 # Increase this for foldables, tablets, or wide phone terminals.
 # mobile_width_threshold = 64

@@ -14,12 +14,13 @@ use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
-const AGENT_PANEL_HEADER_ROWS: u16 = 3;
+const AGENT_PANEL_HEADER_ROWS: u16 = 2;
 
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
     pub agent_label: Option<String>,
@@ -29,43 +30,19 @@ pub(crate) struct AgentPanelEntry {
     pub state_labels: std::collections::HashMap<String, String>,
 }
 
-fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
-    if total_h == 0 {
-        return (0, 0);
-    }
-
-    if total_h < 6 {
-        let ws_h = total_h.div_ceil(2);
-        return (ws_h, total_h.saturating_sub(ws_h));
-    }
-
-    let ratio = split_ratio.clamp(0.1, 0.9);
-    let ws_h = ((total_h as f32) * ratio).round() as u16;
-    let ws_h = ws_h.clamp(3, total_h.saturating_sub(3));
-    let detail_h = total_h.saturating_sub(ws_h);
-    (ws_h, detail_h)
-}
-
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height == 0 {
-        return (Rect::default(), Rect::default());
-    }
-
-    let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
-    let detail_area = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
-    (ws_area, detail_area)
-}
-
-pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height < 6 {
+/// Content area of the right-docked agents bar. The leftmost column is
+/// reserved for the vertical separator that divides the bar from the
+/// terminal area, so the content starts one column in.
+pub(crate) fn agents_bar_content_rect(area: Rect) -> Rect {
+    if area.width <= 1 || area.height == 0 {
         return Rect::default();
     }
-
-    let (ws_h, _) = sidebar_section_heights(content.height, split_ratio);
-    Rect::new(content.x, content.y + ws_h, content.width, 1)
+    Rect::new(
+        area.x + 1,
+        area.y,
+        area.width.saturating_sub(1),
+        area.height,
+    )
 }
 
 fn agent_panel_current_workspace_idx(app: &AppState) -> Option<usize> {
@@ -104,7 +81,7 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, scope: AgentPanelScope) -> Rec
     let width = label.chars().count() as u16;
     Rect::new(
         area.x + area.width.saturating_sub(width),
-        area.y + 1,
+        area.y,
         width,
         1,
     )
@@ -134,7 +111,7 @@ fn agent_panel_entries_with_runtimes(
         }
     };
 
-    match app.agent_panel_scope {
+    let mut entries: Vec<AgentPanelEntry> = match app.agent_panel_scope {
         AgentPanelScope::CurrentWorkspace => {
             let Some(ws_idx) = agent_panel_current_workspace_idx(app) else {
                 return Vec::new();
@@ -148,6 +125,7 @@ fn agent_panel_entries_with_runtimes(
                     ws_idx,
                     tab_idx: detail.tab_idx,
                     pane_id: detail.pane_id,
+                    terminal_id: detail.terminal_id,
                     primary_label: detail.label,
                     primary_tab_label: None,
                     agent_label: None,
@@ -171,6 +149,7 @@ fn agent_panel_entries_with_runtimes(
                         ws_idx,
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
+                        terminal_id: detail.terminal_id,
                         primary_label: workspace_label.clone(),
                         primary_tab_label: multi_tab.then_some(detail.tab_label),
                         agent_label: Some(detail.agent_label),
@@ -181,7 +160,89 @@ fn agent_panel_entries_with_runtimes(
                     })
             })
             .collect(),
+    };
+
+    // Split into a "needs attention" section (everything not actively working,
+    // ordered FIFO by when each agent entered that state) on top, and a
+    // "working" section (natural order) below. The sort is stable, so within
+    // each section the original order is preserved.
+    entries.sort_by_key(|entry| {
+        if entry.state == AgentState::Working {
+            (1u8, u64::MAX)
+        } else {
+            (
+                0u8,
+                app.agent_attention_order
+                    .get(&entry.terminal_id)
+                    .copied()
+                    .unwrap_or(u64::MAX),
+            )
+        }
+    });
+    entries
+}
+
+/// Index in an ordered entry list where the "working" section begins (equal to
+/// the number of agents needing attention). Entries are produced already
+/// ordered [attention.., working..], so this is the first working entry.
+pub(crate) fn agent_panel_working_start(entries: &[AgentPanelEntry]) -> usize {
+    entries
+        .iter()
+        .position(|entry| entry.state == AgentState::Working)
+        .unwrap_or(entries.len())
+}
+
+/// A single agent entry placed at a body row, produced by the shared layout
+/// walk used by rendering, hit-testing, and scroll metrics.
+pub(crate) struct PlacedAgentRow {
+    pub entry_idx: usize,
+    pub y: u16,
+}
+
+/// Walk the (already ordered) entries into placed rows within `body`, inserting
+/// "needs attention" / "working" section sub-headers when both sections are
+/// non-empty. Each entry occupies a name row + status row + a trailing gap;
+/// each header occupies a single row. Returns the placed entries and the header
+/// rows so render and hit-test stay in lockstep.
+pub(crate) fn place_agent_panel_rows(
+    entries: &[AgentPanelEntry],
+    body: Rect,
+    scroll: usize,
+) -> (Vec<PlacedAgentRow>, Vec<(&'static str, u16)>) {
+    let mut placed = Vec::new();
+    let mut headers = Vec::new();
+    if body.width == 0 || body.height < 2 {
+        return (placed, headers);
     }
+
+    let working_start = agent_panel_working_start(entries);
+    let show_headers = working_start > 0 && working_start < entries.len();
+    let body_bottom = body.y + body.height;
+    let mut y = body.y;
+    let mut last_section: Option<bool> = None;
+
+    for (idx, entry) in entries.iter().enumerate().skip(scroll) {
+        let is_working = entry.state == AgentState::Working;
+        let need_header = show_headers && last_section != Some(is_working);
+        let needed = if need_header { 3 } else { 2 };
+        if y.saturating_add(needed) > body_bottom {
+            break;
+        }
+        if need_header {
+            headers.push((
+                if is_working { "working" } else { "needs attention" },
+                y,
+            ));
+            y += 1;
+        }
+        last_section = Some(is_working);
+        placed.push(PlacedAgentRow { entry_idx: idx, y });
+        y += 2;
+        if y < body_bottom {
+            y += 1;
+        }
+    }
+    (placed, headers)
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -330,7 +391,7 @@ fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) 
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area);
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -444,9 +505,20 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
     entries
 }
 
-pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
-    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
-    ws_area
+/// The workspace list now occupies the left sidebar (the agents panel has
+/// moved to its own right-docked bar). The rightmost column is reserved for
+/// the sidebar's vertical separator, and the bottom row is reserved for the
+/// collapse toggle so the footer (new/menu) never lands on the toggle's cell.
+pub(crate) fn workspace_list_rect(area: Rect) -> Rect {
+    if area.width == 0 || area.height <= 1 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(1),
+        area.height.saturating_sub(1),
+    )
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -538,27 +610,13 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
-fn agent_panel_visible_count(area: Rect) -> usize {
-    let body = agent_panel_body_rect(area, false);
-    if body.width == 0 || body.height < 2 {
-        return 0;
-    }
-
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
-    while used_rows.saturating_add(2) <= body.height {
-        used_rows = used_rows.saturating_add(2);
-        visible += 1;
-        if used_rows < body.height {
-            used_rows = used_rows.saturating_add(1);
-        }
-    }
-    visible
-}
-
 pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::pane::ScrollMetrics {
-    let viewport_rows = agent_panel_visible_count(area);
-    let total_rows = agent_panel_entries(app).len();
+    let entries = agent_panel_entries(app);
+    let total_rows = entries.len();
+    // Count how many entries fit from the top (section headers consume rows, so
+    // this is derived from the same layout walk the renderer uses).
+    let body = agent_panel_body_rect(area, false);
+    let viewport_rows = place_agent_panel_rows(&entries, body, 0).0.len();
     let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
     let offset_from_bottom = total_rows
         .saturating_sub(app.agent_panel_scroll)
@@ -586,7 +644,7 @@ pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
 ) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -643,26 +701,15 @@ pub(crate) fn compute_workspace_card_areas(
 
 /// Auto-scale sidebar width based on workspace identity + agent summary.
 pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
+    // The collapsed sidebar shows only the workspace glance now; the agents
+    // panel lives in its own right-docked bar. Return the full content area
+    // with no divider and an empty agent-detail section.
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), None, Rect::default());
     }
 
-    if content.height < 7 {
-        return (content, None, Rect::default());
-    }
-
-    let total_h = content.height as usize;
-    let ws_h = total_h.div_ceil(2);
-    let detail_h = total_h.saturating_sub(ws_h + 1);
-    if ws_h == 0 || detail_h == 0 {
-        return (content, None, Rect::default());
-    }
-
-    let divider_y = content.y + ws_h as u16;
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
-    let detail_area = Rect::new(content.x, divider_y + 1, content.width, detail_h as u16);
-    (ws_area, Some(divider_y), detail_area)
+    (content, None, Rect::default())
 }
 
 /// Collapsed sidebar: workspace glance on top, compact agent list below.
@@ -830,11 +877,41 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area);
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_agent_detail(app, terminal_runtimes, frame, detail_area);
     render_sidebar_toggle(app, frame, area, false, p);
+}
+
+/// Render the right-docked agents bar: a vertical separator on its inner
+/// (left) edge, then the agent panel content.
+pub(super) fn render_agents_bar(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let p = &app.palette;
+    let is_navigating = matches!(app.mode, Mode::Navigate);
+    let sep_style = if is_navigating {
+        Style::default().fg(p.accent)
+    } else {
+        Style::default().fg(p.surface_dim)
+    };
+
+    // Separator sits on the inner (left) edge, adjacent to the terminal area.
+    let sep_x = area.x;
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y + area.height {
+        buf[(sep_x, y)].set_symbol("│");
+        buf[(sep_x, y)].set_style(sep_style);
+    }
+
+    render_agent_detail(app, terminal_runtimes, frame, agents_bar_content_rect(area));
 }
 
 fn render_workspace_list(
@@ -1054,22 +1131,16 @@ fn render_agent_detail(
 ) {
     let p = &app.palette;
 
-    if area.height < 3 {
+    if area.height < 2 {
         return;
     }
-
-    let sep_line = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(Span::styled(&sep_line, Style::default().fg(p.surface_dim))),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " agents",
             Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
         )])),
-        Rect::new(area.x, area.y + 1, area.width, 1),
+        Rect::new(area.x, area.y, area.width, 1),
     );
     let toggle_rect = agent_panel_toggle_rect(area, app.agent_panel_scope);
     if toggle_rect != Rect::default() {
@@ -1091,12 +1162,22 @@ fn render_agent_detail(
         return;
     }
 
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
-    for detail in details.iter().skip(app.agent_panel_scroll) {
-        if row_y.saturating_add(1) >= body_bottom {
-            break;
-        }
+    let (placed, section_headers) = place_agent_panel_rows(&details, body, app.agent_panel_scroll);
+
+    let header_style = Style::default()
+        .fg(p.overlay0)
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::DIM);
+    for (label, y) in section_headers {
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!(" {label}"), header_style)),
+            Rect::new(body.x, y, body.width, 1),
+        );
+    }
+
+    for placement in &placed {
+        let detail = &details[placement.entry_idx];
+        let row_y = placement.y;
 
         // Check if this agent entry corresponds to the active session
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
@@ -1139,7 +1220,6 @@ fn render_agent_detail(
             Paragraph::new(name_line).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
-        row_y += 1;
 
         let mut status_spans = vec![
             Span::styled("   ", Style::default()),
@@ -1155,13 +1235,8 @@ fn render_agent_detail(
         }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(row_style),
-            Rect::new(body.x, row_y, body.width, 1),
+            Rect::new(body.x, row_y + 1, body.width, 1),
         );
-        row_y += 1;
-
-        if row_y < body_bottom {
-            row_y += 1;
-        }
     }
 
     if let Some(track) = scrollbar_rect {
@@ -1220,6 +1295,92 @@ mod tests {
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn set_pane_agent_state(
+        app: &mut crate::app::state::AppState,
+        ws: usize,
+        tab: usize,
+        pane: crate::layout::PaneId,
+        state: AgentState,
+    ) {
+        let terminal_id = app.workspaces[ws].tabs[tab].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        // A detected agent is required for the pane to appear in the agents bar.
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = state;
+    }
+
+    #[test]
+    fn agent_panel_orders_attention_fifo_then_working() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let working_pane = ws.tabs[0].root_pane;
+        let done_tab = ws.test_add_tab(Some("done"));
+        let done_pane = ws.tabs[done_tab].root_pane;
+        let blocked_tab = ws.test_add_tab(Some("blocked"));
+        let blocked_pane = ws.tabs[blocked_tab].root_pane;
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+
+        set_pane_agent_state(&mut app, 0, 0, working_pane, AgentState::Working);
+        set_pane_agent_state(&mut app, 0, done_tab, done_pane, AgentState::Idle);
+        set_pane_agent_state(&mut app, 0, blocked_tab, blocked_pane, AgentState::Blocked);
+
+        app.reconcile_agent_attention_order();
+        let entries = agent_panel_entries(&app);
+        let order: Vec<_> = entries.iter().map(|entry| entry.pane_id).collect();
+
+        // Attention section first (FIFO: done observed before blocked), working last.
+        assert_eq!(order, vec![done_pane, blocked_pane, working_pane]);
+        assert_eq!(agent_panel_working_start(&entries), 2);
+    }
+
+    #[test]
+    fn agent_attention_queue_appends_on_repeat_completion() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let a = ws.tabs[0].root_pane;
+        let b_tab = ws.test_add_tab(Some("b"));
+        let b = ws.tabs[b_tab].root_pane;
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+
+        let order = |app: &crate::app::state::AppState| -> Vec<crate::layout::PaneId> {
+            agent_panel_entries(app)
+                .iter()
+                .map(|entry| entry.pane_id)
+                .collect()
+        };
+
+        // Both working -> nothing in the attention queue.
+        set_pane_agent_state(&mut app, 0, 0, a, AgentState::Working);
+        set_pane_agent_state(&mut app, 0, b_tab, b, AgentState::Working);
+        app.reconcile_agent_attention_order();
+        assert!(app.agent_attention_order.is_empty());
+
+        // A finishes, then B finishes -> FIFO [A, B].
+        set_pane_agent_state(&mut app, 0, 0, a, AgentState::Idle);
+        app.reconcile_agent_attention_order();
+        set_pane_agent_state(&mut app, 0, b_tab, b, AgentState::Idle);
+        app.reconcile_agent_attention_order();
+        assert_eq!(order(&app), vec![a, b]);
+
+        // A starts working again -> drops to the working section at the bottom.
+        set_pane_agent_state(&mut app, 0, 0, a, AgentState::Working);
+        app.reconcile_agent_attention_order();
+        assert_eq!(order(&app), vec![b, a]);
+
+        // A finishes again -> rejoins the attention queue at the END (after B).
+        set_pane_agent_state(&mut app, 0, 0, a, AgentState::Idle);
+        app.reconcile_agent_attention_order();
+        assert_eq!(order(&app), vec![b, a]);
+    }
 
     #[test]
     fn render_sidebar_toggle_draws_expanded_collapse_icon() {
@@ -1387,6 +1548,7 @@ mod tests {
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),
+            terminal_id: crate::terminal::TerminalId::alloc(),
             primary_label: "agent-browser".into(),
             primary_tab_label: Some("test-escalation".into()),
             agent_label: Some("claude".into()),
@@ -1402,18 +1564,19 @@ mod tests {
     }
 
     #[test]
-    fn expanded_sidebar_sections_handle_tiny_heights() {
-        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
+    fn workspace_list_rect_reserves_separator_column_and_toggle_row() {
+        let ws_area = workspace_list_rect(Rect::new(0, 0, 20, 8));
 
-        assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
-        assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
+        // One column reserved on the right for the separator, one row reserved
+        // at the bottom for the collapse toggle.
+        assert_eq!(ws_area, Rect::new(0, 0, 19, 7));
     }
 
     #[test]
-    fn sidebar_section_divider_is_hidden_for_tiny_heights() {
-        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5);
+    fn agents_bar_content_reserves_left_separator_column() {
+        let content = agents_bar_content_rect(Rect::new(80, 0, 20, 8));
 
-        assert_eq!(divider, Rect::default());
+        assert_eq!(content, Rect::new(81, 0, 19, 8));
     }
 
     #[test]

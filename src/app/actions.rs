@@ -1179,14 +1179,10 @@ impl AppState {
     }
 
     fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
-        if self.sidebar_collapsed {
+        let detail_area = crate::ui::agents_bar_content_rect(self.view.agents_bar_rect);
+        if detail_area == ratatui::layout::Rect::default() {
             return;
         }
-
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
         let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
         let visible = metrics.viewport_rows;
         if visible == 0 {
@@ -2210,6 +2206,47 @@ impl AppState {
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
         }
+    }
+
+    /// Keep `agent_attention_order` in sync with the live agent states so the
+    /// agents bar can show a FIFO "needs attention" section on top and a
+    /// "working" section below. Agents that are working are dropped from the
+    /// queue; non-working agents get a monotonic sequence on first sighting
+    /// (their FIFO arrival); panes that no longer exist are pruned. Runs every
+    /// frame, so it is idempotent and self-healing.
+    pub(crate) fn reconcile_agent_attention_order(&mut self) {
+        // Collect (terminal, is_working) for every pane in a stable layout order
+        // first (immutable borrows), then mutate the ordering map.
+        let mut current: Vec<(crate::terminal::TerminalId, bool)> = Vec::new();
+        for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                for pane_id in tab.layout.pane_ids() {
+                    if let Some(pane) = tab.panes.get(&pane_id) {
+                        let terminal_id = pane.attached_terminal_id.clone();
+                        let working = self
+                            .terminals
+                            .get(&terminal_id)
+                            .is_some_and(|terminal| terminal.state == AgentState::Working);
+                        current.push((terminal_id, working));
+                    }
+                }
+            }
+        }
+
+        let mut seen: std::collections::HashSet<crate::terminal::TerminalId> =
+            std::collections::HashSet::with_capacity(current.len());
+        for (terminal_id, working) in current {
+            if working {
+                self.agent_attention_order.remove(&terminal_id);
+            } else if !self.agent_attention_order.contains_key(&terminal_id) {
+                self.agent_attention_seq = self.agent_attention_seq.saturating_add(1);
+                let seq = self.agent_attention_seq;
+                self.agent_attention_order.insert(terminal_id.clone(), seq);
+            }
+            seen.insert(terminal_id);
+        }
+        self.agent_attention_order
+            .retain(|terminal_id, _| seen.contains(terminal_id));
     }
 
     fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>

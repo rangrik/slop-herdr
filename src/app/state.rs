@@ -721,6 +721,8 @@ pub enum ViewLayout {
 pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
+    /// Right-docked agents bar (empty when collapsed/hidden or on mobile).
+    pub agents_bar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -1015,7 +1017,7 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
-    SidebarSectionDivider,
+    AgentsBarDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -1240,6 +1242,12 @@ pub struct AppState {
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
+    /// Monotonic counter used to stamp the FIFO order in which agents enter the
+    /// "needs attention" (non-working) state for the agents bar.
+    pub agent_attention_seq: u64,
+    /// FIFO arrival order of agents currently needing attention, keyed by their
+    /// terminal. Absent = the agent is currently working. Reconciled each frame.
+    pub agent_attention_order: std::collections::HashMap<crate::terminal::TerminalId, u64>,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1267,6 +1275,8 @@ pub struct AppState {
     pub prefix_mods: KeyModifiers,
     pub default_sidebar_width: u16,
     pub sidebar_width: u16,
+    /// Width (columns) of the right-docked agents bar.
+    pub agents_bar_width: u16,
     pub sidebar_min_width: u16,
     pub sidebar_max_width: u16,
     pub mobile_width_threshold: u16,
@@ -1554,12 +1564,15 @@ impl AppState {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            agent_attention_seq: 0,
+            agent_attention_order: std::collections::HashMap::new(),
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
             view: ViewState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
+                agents_bar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -1591,6 +1604,7 @@ impl AppState {
             prefix_mods: KeyModifiers::CONTROL,
             default_sidebar_width: 26,
             sidebar_width: 26,
+            agents_bar_width: 30,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,

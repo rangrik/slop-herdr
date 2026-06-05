@@ -369,6 +369,11 @@ impl App {
             (18, 36)
         });
 
+        let agents_bar_width = config
+            .ui
+            .agents_bar_width
+            .clamp(sidebar_min_width, sidebar_max_width);
+
         let worktree_directory =
             crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
 
@@ -448,12 +453,15 @@ impl App {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            agent_attention_seq: 0,
+            agent_attention_order: std::collections::HashMap::new(),
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
+                agents_bar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -485,6 +493,7 @@ impl App {
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
             sidebar_width,
+            agents_bar_width,
             sidebar_min_width,
             sidebar_max_width,
             mobile_width_threshold: config.ui.mobile_width_threshold,
@@ -1177,6 +1186,10 @@ impl App {
                 self.state.sidebar_width = self
                     .state
                     .sidebar_width
+                    .clamp(self.state.sidebar_min_width, self.state.sidebar_max_width);
+                self.state.agents_bar_width = self
+                    .state
+                    .agents_bar_width
                     .clamp(self.state.sidebar_min_width, self.state.sidebar_max_width);
                 self.state.mouse_capture = config.ui.mouse_capture;
                 if self.state.redraw_on_focus_gained != config.ui.redraw_on_focus_gained {

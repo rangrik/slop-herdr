@@ -1,0 +1,12 @@
+name: debug-tap-token
+on: { workflow_dispatch: {} }
+jobs:
+  d:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          echo "token_owner=$(gh api user --jq .login 2>&1)"
+          echo "--- access to rangrik/homebrew-tap ---"
+          gh api /repos/rangrik/homebrew-tap --jq '{full_name, push:.permissions.push, admin:.permissions.admin, pull:.permissions.pull}' 2>&1 || echo "NO ACCESS to rangrik/homebrew-tap"

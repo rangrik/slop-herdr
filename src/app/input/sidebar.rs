@@ -402,20 +402,13 @@ impl AppState {
             return None;
         }
 
-        let mut row_y = body.y;
-        for detail in crate::ui::agent_panel_entries(self)
-            .into_iter()
-            .skip(self.agent_panel_scroll)
-        {
-            if row_y.saturating_add(1) >= body.y + body.height {
-                break;
-            }
-            if row == row_y || row == row_y + 1 {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
-            }
-            row_y = row_y.saturating_add(2);
-            if row_y < body.y + body.height {
-                row_y = row_y.saturating_add(1);
+        let entries = crate::ui::agent_panel_entries(self);
+        let (placed, _headers) =
+            crate::ui::place_agent_panel_rows(&entries, body, self.agent_panel_scroll);
+        for placement in placed {
+            if row == placement.y || row == placement.y + 1 {
+                let entry = &entries[placement.entry_idx];
+                return Some((entry.ws_idx, entry.tab_idx, entry.pane_id));
             }
         }
         None

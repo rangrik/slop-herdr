@@ -1242,6 +1242,12 @@ pub struct AppState {
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
+    /// Monotonic counter used to stamp the FIFO order in which agents enter the
+    /// "needs attention" (non-working) state for the agents bar.
+    pub agent_attention_seq: u64,
+    /// FIFO arrival order of agents currently needing attention, keyed by their
+    /// terminal. Absent = the agent is currently working. Reconciled each frame.
+    pub agent_attention_order: std::collections::HashMap<crate::terminal::TerminalId, u64>,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1558,6 +1564,8 @@ impl AppState {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            agent_attention_seq: 0,
+            agent_attention_order: std::collections::HashMap::new(),
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,

@@ -9,6 +9,7 @@ use super::{Tab, Workspace};
 /// Detail info for a single pane, used by the agent detail panel.
 pub struct PaneDetail {
     pub pane_id: PaneId,
+    pub terminal_id: TerminalId,
     pub tab_idx: usize,
     pub tab_label: String,
     pub label: String,
@@ -48,6 +49,7 @@ impl Tab {
                 let presentation = terminal.effective_presentation();
                 Some(PaneDetail {
                     pane_id: *id,
+                    terminal_id: pane.attached_terminal_id.clone(),
                     tab_idx: self.number.saturating_sub(1),
                     tab_label: self.display_name(),
                     label: agent_label.clone(),

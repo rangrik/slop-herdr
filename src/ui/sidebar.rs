@@ -20,6 +20,7 @@ pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
     pub agent_label: Option<String>,
@@ -110,7 +111,7 @@ fn agent_panel_entries_with_runtimes(
         }
     };
 
-    match app.agent_panel_scope {
+    let mut entries: Vec<AgentPanelEntry> = match app.agent_panel_scope {
         AgentPanelScope::CurrentWorkspace => {
             let Some(ws_idx) = agent_panel_current_workspace_idx(app) else {
                 return Vec::new();
@@ -124,6 +125,7 @@ fn agent_panel_entries_with_runtimes(
                     ws_idx,
                     tab_idx: detail.tab_idx,
                     pane_id: detail.pane_id,
+                    terminal_id: detail.terminal_id,
                     primary_label: detail.label,
                     primary_tab_label: None,
                     agent_label: None,
@@ -147,6 +149,7 @@ fn agent_panel_entries_with_runtimes(
                         ws_idx,
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
+                        terminal_id: detail.terminal_id,
                         primary_label: workspace_label.clone(),
                         primary_tab_label: multi_tab.then_some(detail.tab_label),
                         agent_label: Some(detail.agent_label),
@@ -157,7 +160,89 @@ fn agent_panel_entries_with_runtimes(
                     })
             })
             .collect(),
+    };
+
+    // Split into a "needs attention" section (everything not actively working,
+    // ordered FIFO by when each agent entered that state) on top, and a
+    // "working" section (natural order) below. The sort is stable, so within
+    // each section the original order is preserved.
+    entries.sort_by_key(|entry| {
+        if entry.state == AgentState::Working {
+            (1u8, u64::MAX)
+        } else {
+            (
+                0u8,
+                app.agent_attention_order
+                    .get(&entry.terminal_id)
+                    .copied()
+                    .unwrap_or(u64::MAX),
+            )
+        }
+    });
+    entries
+}
+
+/// Index in an ordered entry list where the "working" section begins (equal to
+/// the number of agents needing attention). Entries are produced already
+/// ordered [attention.., working..], so this is the first working entry.
+pub(crate) fn agent_panel_working_start(entries: &[AgentPanelEntry]) -> usize {
+    entries
+        .iter()
+        .position(|entry| entry.state == AgentState::Working)
+        .unwrap_or(entries.len())
+}
+
+/// A single agent entry placed at a body row, produced by the shared layout
+/// walk used by rendering, hit-testing, and scroll metrics.
+pub(crate) struct PlacedAgentRow {
+    pub entry_idx: usize,
+    pub y: u16,
+}
+
+/// Walk the (already ordered) entries into placed rows within `body`, inserting
+/// "needs attention" / "working" section sub-headers when both sections are
+/// non-empty. Each entry occupies a name row + status row + a trailing gap;
+/// each header occupies a single row. Returns the placed entries and the header
+/// rows so render and hit-test stay in lockstep.
+pub(crate) fn place_agent_panel_rows(
+    entries: &[AgentPanelEntry],
+    body: Rect,
+    scroll: usize,
+) -> (Vec<PlacedAgentRow>, Vec<(&'static str, u16)>) {
+    let mut placed = Vec::new();
+    let mut headers = Vec::new();
+    if body.width == 0 || body.height < 2 {
+        return (placed, headers);
     }
+
+    let working_start = agent_panel_working_start(entries);
+    let show_headers = working_start > 0 && working_start < entries.len();
+    let body_bottom = body.y + body.height;
+    let mut y = body.y;
+    let mut last_section: Option<bool> = None;
+
+    for (idx, entry) in entries.iter().enumerate().skip(scroll) {
+        let is_working = entry.state == AgentState::Working;
+        let need_header = show_headers && last_section != Some(is_working);
+        let needed = if need_header { 3 } else { 2 };
+        if y.saturating_add(needed) > body_bottom {
+            break;
+        }
+        if need_header {
+            headers.push((
+                if is_working { "working" } else { "needs attention" },
+                y,
+            ));
+            y += 1;
+        }
+        last_section = Some(is_working);
+        placed.push(PlacedAgentRow { entry_idx: idx, y });
+        y += 2;
+        if y < body_bottom {
+            y += 1;
+        }
+    }
+    (placed, headers)
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -525,27 +610,13 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
-fn agent_panel_visible_count(area: Rect) -> usize {
-    let body = agent_panel_body_rect(area, false);
-    if body.width == 0 || body.height < 2 {
-        return 0;
-    }
-
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
-    while used_rows.saturating_add(2) <= body.height {
-        used_rows = used_rows.saturating_add(2);
-        visible += 1;
-        if used_rows < body.height {
-            used_rows = used_rows.saturating_add(1);
-        }
-    }
-    visible
-}
-
 pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::pane::ScrollMetrics {
-    let viewport_rows = agent_panel_visible_count(area);
-    let total_rows = agent_panel_entries(app).len();
+    let entries = agent_panel_entries(app);
+    let total_rows = entries.len();
+    // Count how many entries fit from the top (section headers consume rows, so
+    // this is derived from the same layout walk the renderer uses).
+    let body = agent_panel_body_rect(area, false);
+    let viewport_rows = place_agent_panel_rows(&entries, body, 0).0.len();
     let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
     let offset_from_bottom = total_rows
         .saturating_sub(app.agent_panel_scroll)
@@ -1091,12 +1162,22 @@ fn render_agent_detail(
         return;
     }
 
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
-    for detail in details.iter().skip(app.agent_panel_scroll) {
-        if row_y.saturating_add(1) >= body_bottom {
-            break;
-        }
+    let (placed, section_headers) = place_agent_panel_rows(&details, body, app.agent_panel_scroll);
+
+    let header_style = Style::default()
+        .fg(p.overlay0)
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::DIM);
+    for (label, y) in section_headers {
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!(" {label}"), header_style)),
+            Rect::new(body.x, y, body.width, 1),
+        );
+    }
+
+    for placement in &placed {
+        let detail = &details[placement.entry_idx];
+        let row_y = placement.y;
 
         // Check if this agent entry corresponds to the active session
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
@@ -1139,7 +1220,6 @@ fn render_agent_detail(
             Paragraph::new(name_line).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
-        row_y += 1;
 
         let mut status_spans = vec![
             Span::styled("   ", Style::default()),
@@ -1155,13 +1235,8 @@ fn render_agent_detail(
         }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(row_style),
-            Rect::new(body.x, row_y, body.width, 1),
+            Rect::new(body.x, row_y + 1, body.width, 1),
         );
-        row_y += 1;
-
-        if row_y < body_bottom {
-            row_y += 1;
-        }
     }
 
     if let Some(track) = scrollbar_rect {
@@ -1220,6 +1295,92 @@ mod tests {
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn set_pane_agent_state(
+        app: &mut crate::app::state::AppState,
+        ws: usize,
+        tab: usize,
+        pane: crate::layout::PaneId,
+        state: AgentState,
+    ) {
+        let terminal_id = app.workspaces[ws].tabs[tab].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        // A detected agent is required for the pane to appear in the agents bar.
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = state;
+    }
+
+    #[test]
+    fn agent_panel_orders_attention_fifo_then_working() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let working_pane = ws.tabs[0].root_pane;
+        let done_tab = ws.test_add_tab(Some("done"));
+        let done_pane = ws.tabs[done_tab].root_pane;
+        let blocked_tab = ws.test_add_tab(Some("blocked"));
+        let blocked_pane = ws.tabs[blocked_tab].root_pane;
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+
+        set_pane_agent_state(&mut app, 0, 0, working_pane, AgentState::Working);
+        set_pane_agent_state(&mut app, 0, done_tab, done_pane, AgentState::Idle);
+        set_pane_agent_state(&mut app, 0, blocked_tab, blocked_pane, AgentState::Blocked);
+
+        app.reconcile_agent_attention_order();
+        let entries = agent_panel_entries(&app);
+        let order: Vec<_> = entries.iter().map(|entry| entry.pane_id).collect();
+
+        // Attention section first (FIFO: done observed before blocked), working last.
+        assert_eq!(order, vec![done_pane, blocked_pane, working_pane]);
+        assert_eq!(agent_panel_working_start(&entries), 2);
+    }
+
+    #[test]
+    fn agent_attention_queue_appends_on_repeat_completion() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let a = ws.tabs[0].root_pane;
+        let b_tab = ws.test_add_tab(Some("b"));
+        let b = ws.tabs[b_tab].root_pane;
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+
+        let order = |app: &crate::app::state::AppState| -> Vec<crate::layout::PaneId> {
+            agent_panel_entries(app)
+                .iter()
+                .map(|entry| entry.pane_id)
+                .collect()
+        };
+
+        // Both working -> nothing in the attention queue.
+        set_pane_agent_state(&mut app, 0, 0, a, AgentState::Working);
+        set_pane_agent_state(&mut app, 0, b_tab, b, AgentState::Working);
+        app.reconcile_agent_attention_order();
+        assert!(app.agent_attention_order.is_empty());
+
+        // A finishes, then B finishes -> FIFO [A, B].
+        set_pane_agent_state(&mut app, 0, 0, a, AgentState::Idle);
+        app.reconcile_agent_attention_order();
+        set_pane_agent_state(&mut app, 0, b_tab, b, AgentState::Idle);
+        app.reconcile_agent_attention_order();
+        assert_eq!(order(&app), vec![a, b]);
+
+        // A starts working again -> drops to the working section at the bottom.
+        set_pane_agent_state(&mut app, 0, 0, a, AgentState::Working);
+        app.reconcile_agent_attention_order();
+        assert_eq!(order(&app), vec![b, a]);
+
+        // A finishes again -> rejoins the attention queue at the END (after B).
+        set_pane_agent_state(&mut app, 0, 0, a, AgentState::Idle);
+        app.reconcile_agent_attention_order();
+        assert_eq!(order(&app), vec![b, a]);
+    }
 
     #[test]
     fn render_sidebar_toggle_draws_expanded_collapse_icon() {
@@ -1387,6 +1548,7 @@ mod tests {
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),
+            terminal_id: crate::terminal::TerminalId::alloc(),
             primary_label: "agent-browser".into(),
             primary_tab_label: Some("test-escalation".into()),
             agent_label: Some("claude".into()),

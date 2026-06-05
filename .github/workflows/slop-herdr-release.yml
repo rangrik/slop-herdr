@@ -1,0 +1,166 @@
+name: slop-herdr release (Homebrew tap)
+
+# Auto-build a macOS arm64 binary on every merge to master and publish it
+# through the rangrik/homebrew-tap. The publish job is gated on the optional
+# TAP_TOKEN secret: without it, the run still builds + uploads the artifact and
+# stays green.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "vendor/**"
+      - "build.rs"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # vendor/libghostty-vt is vendored in-tree (not a submodule), so no
+        # submodule checkout is required.
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install macOS build tools
+        run: brew install cmake ninja
+
+      - name: Verify zig version
+        run: zig version
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Compute version and tag
+        id: version
+        run: |
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          VERSION="${CARGO_VERSION}.${{ github.run_number }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=slop-herdr-${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${VERSION}"
+
+      - name: Package tarball
+        run: tar -C target/release -czf herdr-aarch64-macos.tar.gz herdr
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: herdr-aarch64-macos
+          path: herdr-aarch64-macos.tar.gz
+          if-no-files-found: error
+
+  # Detect whether the TAP_TOKEN secret is present. The `secrets` context is
+  # not available in job-level `if:` conditions, so we surface its presence as
+  # a job output and gate the publish job on that. Without the secret the
+  # publish job is SKIPPED (not failed) and the run stays green with just the
+  # uploaded build artifact.
+  check-secret:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      has_token: ${{ steps.gate.outputs.has_token }}
+    steps:
+      - id: gate
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "TAP_TOKEN is not set; publish job will be skipped."
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: [build, check-secret]
+    if: ${{ needs.check-secret.outputs.has_token == 'true' }}
+    runs-on: macos-15
+    steps:
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: herdr-aarch64-macos
+
+      - name: Compute sha256
+        id: sha
+        run: |
+          SHA=$(shasum -a 256 herdr-aarch64-macos.tar.gz | awk '{print $1}')
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${SHA}"
+
+      - name: Create release on homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo rangrik/homebrew-tap \
+            --title "$TAG" \
+            --notes "Automated build of slop-herdr ${VERSION} (macOS arm64)." \
+            herdr-aarch64-macos.tar.gz
+
+      - name: Bump formula on homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          # Cargo package version (without the .run_number suffix) used for the
+          # `herdr --version` test assertion in the formula.
+          CARGO_VERSION="${VERSION%.*}"
+          URL="https://github.com/rangrik/homebrew-tap/releases/download/${TAG}/herdr-aarch64-macos.tar.gz"
+
+          cat > slop-herdr.rb <<EOF
+          class SlopHerdr < Formula
+            desc "Custom herdr (rangrik): right-docked agents bar + FIFO attention/working queue"
+            homepage "https://herdr.dev"
+            version "${VERSION}"
+            url "${URL}"
+            sha256 "${SHA256}"
+            license "AGPL-3.0-or-later"
+
+            conflicts_with "herdr", because: "both install a \`herdr\` binary"
+
+            def install
+              bin.install "herdr"
+            end
+
+            test do
+              assert_match "${CARGO_VERSION}", shell_output("#{bin}/herdr --version")
+            end
+          end
+          EOF
+
+          ENCODED=$(base64 < slop-herdr.rb | tr -d '\n')
+          # Fetch current file sha (formula already exists on the tap).
+          CURRENT_SHA=$(gh api repos/rangrik/homebrew-tap/contents/Formula/slop-herdr.rb --jq .sha)
+          gh api --method PUT repos/rangrik/homebrew-tap/contents/Formula/slop-herdr.rb \
+            -f message="slop-herdr ${VERSION}: bump to ${TAG}" \
+            -f content="${ENCODED}" \
+            -f sha="${CURRENT_SHA}" \
+            -f branch=main

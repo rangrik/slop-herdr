@@ -16,7 +16,7 @@ lint:
 
 # Run PR CI checks
 ci filter='all()': lint
-    cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
+    cargo nextest run --locked --no-fail-fast -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci

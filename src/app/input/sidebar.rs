@@ -274,10 +274,7 @@ impl AppState {
     /// the inner (left) edge, which is also where the vertical separator sits.
     pub(super) fn on_agents_bar_divider(&self, col: u16, row: u16) -> bool {
         let bar = self.view.agents_bar_rect;
-        bar.width > 0
-            && col == bar.x
-            && row >= bar.y
-            && row < bar.y + bar.height
+        bar.width > 0 && col == bar.x && row >= bar.y && row < bar.y + bar.height
     }
 
     pub(super) fn set_manual_agents_bar_width(&mut self, divider_col: u16) {

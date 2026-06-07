@@ -79,12 +79,7 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, scope: AgentPanelScope) -> Rec
 
     let label = agent_panel_toggle_label(scope);
     let width = label.chars().count() as u16;
-    Rect::new(
-        area.x + area.width.saturating_sub(width),
-        area.y,
-        width,
-        1,
-    )
+    Rect::new(area.x + area.width.saturating_sub(width), area.y, width, 1)
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -230,7 +225,11 @@ pub(crate) fn place_agent_panel_rows(
         }
         if need_header {
             headers.push((
-                if is_working { "working" } else { "needs attention" },
+                if is_working {
+                    "working"
+                } else {
+                    "needs attention"
+                },
                 y,
             ));
             y += 1;

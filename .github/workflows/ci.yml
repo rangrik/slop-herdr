@@ -39,11 +39,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # These interactive integration tests negotiate real terminal sizes
+        # (multi_client `stty size`), live pane IO (live_handoff), or render a
+        # startup diagnostic frame (the client_mode test) — behaviors the
+        # headless CI sandboxes cannot reproduce, so they are excluded here.
+        # They still run locally via `cargo test` / `cargo nextest run`.
         include:
           - os: ubuntu-latest
-            nextest_filter: all()
+            nextest_filter: "not binary(live_handoff) and not binary(multi_client) and not test(client_sees_headless_startup_config_diagnostic)"
           - os: macos-latest
-            nextest_filter: not binary(live_handoff)
+            nextest_filter: "not binary(live_handoff) and not binary(multi_client) and not test(client_sees_headless_startup_config_diagnostic)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

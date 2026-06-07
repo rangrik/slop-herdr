@@ -672,7 +672,7 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::OpenWorktree => {
             if let Some(ws_idx) = workspace_action_target(state, context)
-                .filter(|idx| workspace_can_start_worktree_action(state, terminal_runtimes, *idx))
+                .filter(|idx| workspace_can_open_worktree(state, terminal_runtimes, *idx))
             {
                 state.request_open_existing_worktree = Some(ws_idx);
                 leave_navigate_mode(state);
@@ -864,6 +864,28 @@ fn workspace_can_start_worktree_action(
             .and_then(crate::workspace::git_space_metadata)
     });
     !git_space.is_some_and(|space| space.is_linked_worktree)
+}
+
+/// Opening the existing-worktree picker works as a switcher from any worktree of
+/// the repo — including a linked one — so unlike `workspace_can_start_worktree_action`
+/// it only requires the workspace to resolve to a Git work tree.
+fn workspace_can_open_worktree(
+    state: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    ws_idx: usize,
+) -> bool {
+    let Some(ws) = state.workspaces.get(ws_idx) else {
+        return false;
+    };
+    if ws.worktree_space().is_some() {
+        return true;
+    }
+    let git_space = ws.git_space().cloned().or_else(|| {
+        ws.resolved_identity_cwd_from(&state.terminals, terminal_runtimes)
+            .as_deref()
+            .and_then(crate::workspace::git_space_metadata)
+    });
+    git_space.is_some()
 }
 
 fn leave_navigate_mode(state: &mut AppState) {
@@ -1115,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_actions_do_not_start_from_linked_child_workspace() {
+    fn new_worktree_does_not_start_from_linked_child_but_open_does() {
         let mut terminal_runtimes = TerminalRuntimeRegistry::new();
         let mut state = state_with_workspaces(&["main", "issue"]);
         mark_worktree_space_member(&mut state, 0, "repo-key");
@@ -1124,6 +1146,7 @@ mod tests {
         state.selected = 1;
         state.active = Some(0);
 
+        // Creating a new worktree must start from the repo's main checkout.
         execute_navigate_action_in_context(
             &mut state,
             &mut terminal_runtimes,
@@ -1132,13 +1155,14 @@ mod tests {
         );
         assert_eq!(state.request_new_linked_worktree, None);
 
+        // Opening the picker works as a switcher from a linked worktree too.
         execute_navigate_action_in_context(
             &mut state,
             &mut terminal_runtimes,
             NavigateAction::OpenWorktree,
             ActionContext::Navigate,
         );
-        assert_eq!(state.request_open_existing_worktree, None);
+        assert_eq!(state.request_open_existing_worktree, Some(1));
     }
 
     #[test]

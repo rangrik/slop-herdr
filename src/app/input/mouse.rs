@@ -2094,6 +2094,7 @@ mod tests {
             source_existing_membership: None,
             source_checkout_path: "/repo/herdr".into(),
             source_repo_root: "/repo/herdr".into(),
+            source_is_linked_worktree: false,
             repo_key: "repo-key".into(),
             repo_name: "herdr".into(),
             entries: vec![

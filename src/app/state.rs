@@ -647,6 +647,11 @@ pub struct WorktreeOpenState {
     pub source_existing_membership: Option<crate::workspace::WorktreeSpaceMembership>,
     pub source_checkout_path: std::path::PathBuf,
     pub source_repo_root: std::path::PathBuf,
+    /// Whether the workspace the picker was opened from is itself a linked
+    /// worktree (vs. the repo's main checkout). The picker can be launched from
+    /// any worktree, so this is tracked to stamp the source workspace's
+    /// membership correctly when it has none yet.
+    pub source_is_linked_worktree: bool,
     pub repo_key: String,
     pub repo_name: String,
     pub entries: Vec<WorktreeOpenEntry>,

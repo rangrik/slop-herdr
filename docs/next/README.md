@@ -222,6 +222,7 @@ Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-l
 | `prefix+g` | session navigator |
 | `prefix+shift+n` | new workspace |
 | `prefix+shift+g` | new worktree |
+| `prefix+shift+o` | open worktree |
 | `prefix+shift+w` | rename workspace |
 | `prefix+shift+d` | close workspace |
 | `prefix+h/j/k/l` | focus pane |

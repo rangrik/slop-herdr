@@ -10,9 +10,17 @@ use super::{
 use crate::events::{AppEvent, WorktreeAddResult, WorktreeRemoveResult};
 
 impl App {
+    /// Resolve the repo/checkout metadata for a worktree action started from
+    /// workspace `ws_idx`.
+    ///
+    /// `allow_linked_source` controls whether the action may start from a linked
+    /// worktree. Creating a new worktree is anchored at the repo's main checkout
+    /// (`false`), but opening an existing worktree works as a switcher from any
+    /// worktree of the repo, including a linked one (`true`).
     fn worktree_source_metadata(
         &self,
         ws_idx: usize,
+        allow_linked_source: bool,
     ) -> Result<
         (
             Option<crate::workspace::WorktreeSpaceMembership>,
@@ -26,9 +34,10 @@ impl App {
             return Err("Workspace not found.".into());
         };
         let existing_membership = ws.worktree_space().cloned();
-        if existing_membership
-            .as_ref()
-            .is_some_and(|membership| membership.is_linked_worktree)
+        if !allow_linked_source
+            && existing_membership
+                .as_ref()
+                .is_some_and(|membership| membership.is_linked_worktree)
         {
             return Err(
                 "New and open worktree actions start from the repo parent workspace.".into(),
@@ -40,9 +49,10 @@ impl App {
                 .as_deref()
                 .and_then(crate::workspace::git_space_metadata)
         });
-        if git_space
-            .as_ref()
-            .is_some_and(|metadata| metadata.is_linked_worktree)
+        if !allow_linked_source
+            && git_space
+                .as_ref()
+                .is_some_and(|metadata| metadata.is_linked_worktree)
         {
             return Err(
                 "New and open worktree actions start from the repo parent workspace.".into(),
@@ -78,7 +88,7 @@ impl App {
 
     pub(crate) fn open_new_linked_worktree_dialog(&mut self, ws_idx: usize) {
         let (existing_membership, space, source_checkout_path, source_workspace_id) =
-            match self.worktree_source_metadata(ws_idx) {
+            match self.worktree_source_metadata(ws_idx, false) {
                 Ok(metadata) => metadata,
                 Err(err) => {
                     self.state.config_diagnostic = Some(err);
@@ -152,7 +162,7 @@ impl App {
 
     pub(crate) fn open_existing_worktree_dialog(&mut self, ws_idx: usize) {
         let (existing_membership, space, source_checkout_path, source_workspace_id) =
-            match self.worktree_source_metadata(ws_idx) {
+            match self.worktree_source_metadata(ws_idx, true) {
                 Ok(metadata) => metadata,
                 Err(err) => {
                     self.state.config_diagnostic = Some(err);
@@ -221,6 +231,7 @@ impl App {
             source_existing_membership: existing_membership,
             source_checkout_path,
             source_repo_root: space.repo_root,
+            source_is_linked_worktree: space.is_linked_worktree,
             repo_key: space.key,
             repo_name: space.label,
             entries,
@@ -343,6 +354,7 @@ impl App {
         let source_existing_membership = open.source_existing_membership.clone();
         let source_checkout_path = open.source_checkout_path.clone();
         let source_repo_root = open.source_repo_root.clone();
+        let source_is_linked_worktree = open.source_is_linked_worktree;
         let repo_key = open.repo_key.clone();
         let repo_name = open.repo_name.clone();
         self.state.worktree_open = None;
@@ -353,6 +365,7 @@ impl App {
                 source_existing_membership,
                 source_checkout_path,
                 source_repo_root,
+                source_is_linked_worktree,
                 repo_key,
                 repo_name,
                 ws_idx,
@@ -371,6 +384,7 @@ impl App {
                     source_existing_membership,
                     source_checkout_path,
                     source_repo_root,
+                    source_is_linked_worktree,
                     repo_key,
                     repo_name,
                     new_ws_idx,
@@ -384,6 +398,7 @@ impl App {
                     source_existing_membership,
                     source_checkout_path,
                     source_repo_root,
+                    source_is_linked_worktree,
                     repo_key,
                     repo_name,
                     entries: vec![entry],
@@ -406,6 +421,7 @@ impl App {
         source_existing_membership: Option<crate::workspace::WorktreeSpaceMembership>,
         source_checkout_path: std::path::PathBuf,
         source_repo_root: std::path::PathBuf,
+        source_is_linked_worktree: bool,
         repo_key: String,
         repo_name: String,
         target_ws_idx: usize,
@@ -427,7 +443,7 @@ impl App {
                         label: repo_name.clone(),
                         repo_root: source_repo_root.clone(),
                         checkout_path: source_checkout_path,
-                        is_linked_worktree: false,
+                        is_linked_worktree: source_is_linked_worktree,
                     });
             }
         }
@@ -773,6 +789,7 @@ mod tests {
             source_existing_membership: None,
             source_checkout_path: "/repo/herdr".into(),
             source_repo_root: "/repo/herdr".into(),
+            source_is_linked_worktree: false,
             repo_key: "repo-key".into(),
             repo_name: "herdr".into(),
             entries: vec![WorktreeOpenEntry {
@@ -810,6 +827,7 @@ mod tests {
             source_existing_membership: None,
             source_checkout_path: "/repo/herdr".into(),
             source_repo_root: "/repo/herdr".into(),
+            source_is_linked_worktree: false,
             repo_key: "repo-key".into(),
             repo_name: "herdr".into(),
             entries: vec![
@@ -909,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_create_and_open_dialogs_reject_linked_child_source() {
+    fn new_worktree_dialog_rejects_linked_child_source() {
         let mut app = app_for_worktree_tests();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("issue")];
         app.state.mode = Mode::Navigate;
@@ -921,6 +939,7 @@ mod tests {
             is_linked_worktree: true,
         });
 
+        // Creating a new worktree stays anchored at the repo's main checkout.
         app.open_new_linked_worktree_dialog(0);
 
         assert_eq!(app.state.mode, Mode::Navigate);
@@ -929,15 +948,62 @@ mod tests {
             app.state.config_diagnostic.as_deref(),
             Some("New and open worktree actions start from the repo parent workspace.")
         );
+    }
 
-        app.state.config_diagnostic = None;
+    #[test]
+    fn open_existing_worktree_dialog_lists_siblings_from_linked_worktree() {
+        let repo = create_committed_repo("app-worktree-open-from-linked-repo");
+        let checkout = unique_temp_path("app-worktree-open-from-linked-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "worktree/from-linked",
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+
+        let mut app = app_for_worktree_tests();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("linked")];
+        // The focused workspace lives inside the *linked* worktree, not the main
+        // checkout — the picker should still open as a switcher.
+        app.state.workspaces[0].identity_cwd = checkout.clone();
+        app.state.mode = Mode::Navigate;
+        app.state.selected = 0;
+
         app.open_existing_worktree_dialog(0);
 
-        assert!(app.state.worktree_open.is_none());
-        assert_eq!(
-            app.state.config_diagnostic.as_deref(),
-            Some("New and open worktree actions start from the repo parent workspace.")
+        assert_eq!(app.state.config_diagnostic, None);
+        let open = app
+            .state
+            .worktree_open
+            .as_ref()
+            .expect("worktree picker should open from a linked worktree");
+        assert!(open.source_is_linked_worktree);
+
+        let main_root = crate::worktree::canonical_or_original(&repo);
+        let linked_root = crate::worktree::canonical_or_original(&checkout);
+        let paths: Vec<_> = open
+            .entries
+            .iter()
+            .map(|entry| crate::worktree::canonical_or_original(&entry.path))
+            .collect();
+        assert!(
+            paths.contains(&main_root),
+            "expected main checkout {main_root:?} in {paths:?}"
         );
+        assert!(
+            paths.contains(&linked_root),
+            "expected linked checkout {linked_root:?} in {paths:?}"
+        );
+
+        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
+        crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]
